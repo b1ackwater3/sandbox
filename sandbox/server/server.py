@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from sandbox.database import get_databases
 from sandbox.server.online_judge_api import oj_router
 from sandbox.server.sandbox_api import sandbox_router
+from sandbox.server.eval_api import eval_router
 from sandbox.utils.logging import configure_logging
 
 configure_logging()
@@ -35,8 +36,17 @@ async def lifespan(app: FastAPI):
     datalake, sqlite = await get_databases()
     logger.info(f'database initialized')
     yield
-    await datalake.disconnect()
-    await sqlite.disconnect()
+    # Gracefully disconnect only when available
+    try:
+        if datalake is not None:
+            await datalake.disconnect()
+    except Exception:
+        pass
+    try:
+        if sqlite is not None:
+            await sqlite.disconnect()
+    except Exception:
+        pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -86,6 +96,7 @@ async def base_exception_handler(request: Request, exc: Exception):
 
 app.include_router(sandbox_router, tags=['sandbox'])
 app.include_router(oj_router, tags=['datasets'])
+app.include_router(eval_router, tags=['eval'])
 
 
 @app.get("/v1/ping")

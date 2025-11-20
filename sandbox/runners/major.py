@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import os
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -33,12 +34,29 @@ config = RunConfig.get_instance_sync()
 
 @cache
 def get_python_rt_env(env_name: str):
-    r = subprocess.run(f'bash -c "source {find_conda_root()}/bin/activate {env_name} && which python"',
-                       capture_output=True,
-                       text=True,
-                       check=True,
-                       shell=True)
-    python_path = os.path.dirname(r.stdout)
+    """Resolve a PATH where 'python' points to the desired runtime.
+
+    Prefer conda env named `env_name` when a conda root is detected; otherwise
+    fall back to the current interpreter's directory so it works in poetry/venv.
+    """
+    conda_root = find_conda_root()
+    python_path = None
+    try:
+        if isinstance(conda_root, str) and os.path.isdir(conda_root):
+            r = subprocess.run(
+                f'bash -c "source {conda_root}/bin/activate {env_name} && which python"',
+                capture_output=True,
+                text=True,
+                check=True,
+                shell=True)
+            python_path = os.path.dirname(r.stdout.strip())
+    except Exception:
+        python_path = None
+
+    if not python_path:
+        # Fallback: use current interpreter's directory
+        python_path = os.path.dirname(sys.executable)
+
     original_paths = os.environ.get('PATH', '').split(':')
     filtered_path = ':'.join([p for p in original_paths if '/envs/sandbox/' not in p])
     return {'PATH': f'{python_path}:{filtered_path}'}

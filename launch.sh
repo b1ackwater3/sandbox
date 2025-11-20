@@ -1,0 +1,2 @@
+HOST=0.0.0.0 PORT=8080 bash run.sh
+SANDBOX_CONFIG=ci HOST=0.0.0.0 PORT=8080 bash run.sh
