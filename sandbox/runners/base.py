@@ -160,31 +160,58 @@ async def run_commands(compile_command: Optional[str], run_command: str, cwd: st
         return CodeRunResult(compile_result=compile_res, run_result=run_res, files=files)
 
     elif config.sandbox.isolation == 'lite':
-        async with tmp_overlayfs() as root, tmp_cgroup(mem_limit='4G', cpu_limit=1) as cgroups, tmp_netns(
-                kwargs.get('netns_no_bridge', False)) as netns:
-            prefix = []
-            for cg in cgroups:
-                prefix += ['cgexec', '-g', cg]
-            if not kwargs.get('disable_pid_isolation', False):
-                prefix += ['unshare', '--pid', '--fork', '--mount-proc']
-            prefix += ['ip', 'netns', 'exec', netns]
-            prefix += ['chroot', root]
+        # Allow disabling cgroup when unavailable (e.g., cgroup v2 without memory controller)
+        disable_cgroup = str(os.getenv('SANDBOX_LITE_NO_CGROUP', '')).lower() in ('1', 'true', 'yes')
+        if disable_cgroup:
+            async with tmp_overlayfs() as root, tmp_netns(kwargs.get('netns_no_bridge', False)) as netns:
+                cgroups = []
+                prefix = []
+                if not kwargs.get('disable_pid_isolation', False):
+                    prefix += ['unshare', '--pid', '--fork', '--mount-proc']
+                prefix += ['ip', 'netns', 'exec', netns]
+                prefix += ['chroot', root]
 
-            if compile_command is not None:
-                compile_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {compile_command}'],
-                                                     args.compile_timeout, None, cwd, extra_env, True)
-            if compile_res is None or (compile_res.status == CommandRunStatus.Finished and
-                                       compile_res.return_code == 0):
-                run_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {run_command}'],
-                                                 args.run_timeout, args.stdin, cwd, extra_env, True)
+                if compile_command is not None:
+                    compile_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {compile_command}'],
+                                                         args.compile_timeout, None, cwd, extra_env, True)
+                if compile_res is None or (compile_res.status == CommandRunStatus.Finished and
+                                           compile_res.return_code == 0):
+                    run_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {run_command}'],
+                                                     args.run_timeout, args.stdin, cwd, extra_env, True)
 
-            for filename in args.fetch_files:
-                fp = os.path.join(root, os.path.abspath(os.path.join(cwd, filename))[1:])
-                if os.path.isfile(fp):
-                    with open(fp, 'rb') as f:
-                        content = f.read()
-                    base64_content = base64.b64encode(content).decode('utf-8')
-                    files[filename] = base64_content
+                for filename in args.fetch_files:
+                    fp = os.path.join(root, os.path.abspath(os.path.join(cwd, filename))[1:])
+                    if os.path.isfile(fp):
+                        with open(fp, 'rb') as f:
+                            content = f.read()
+                        base64_content = base64.b64encode(content).decode('utf-8')
+                        files[filename] = base64_content
+        else:
+            async with tmp_overlayfs() as root, tmp_cgroup(mem_limit='4G', cpu_limit=1) as cgroups, tmp_netns(
+                    kwargs.get('netns_no_bridge', False)) as netns:
+                prefix = []
+                for cg in cgroups:
+                    prefix += ['cgexec', '-g', cg]
+                if not kwargs.get('disable_pid_isolation', False):
+                    prefix += ['unshare', '--pid', '--fork', '--mount-proc']
+                prefix += ['ip', 'netns', 'exec', netns]
+                prefix += ['chroot', root]
+
+                if compile_command is not None:
+                    compile_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {compile_command}'],
+                                                         args.compile_timeout, None, cwd, extra_env, True)
+                if compile_res is None or (compile_res.status == CommandRunStatus.Finished and
+                                           compile_res.return_code == 0):
+                    run_res = await run_command_bare(prefix + ['bash', '-c', f'cd {cwd} && {run_command}'],
+                                                     args.run_timeout, args.stdin, cwd, extra_env, True)
+
+                for filename in args.fetch_files:
+                    fp = os.path.join(root, os.path.abspath(os.path.join(cwd, filename))[1:])
+                    if os.path.isfile(fp):
+                        with open(fp, 'rb') as f:
+                            content = f.read()
+                        base64_content = base64.b64encode(content).decode('utf-8')
+                        files[filename] = base64_content
             return CodeRunResult(compile_result=compile_res, run_result=run_res, files=files)
 
 
