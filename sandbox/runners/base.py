@@ -186,6 +186,7 @@ async def run_commands(compile_command: Optional[str], run_command: str, cwd: st
                             content = f.read()
                         base64_content = base64.b64encode(content).decode('utf-8')
                         files[filename] = base64_content
+                return CodeRunResult(compile_result=compile_res, run_result=run_res, files=files)
         else:
             async with tmp_overlayfs() as root, tmp_cgroup(mem_limit='4G', cpu_limit=1) as cgroups, tmp_netns(
                     kwargs.get('netns_no_bridge', False)) as netns:
