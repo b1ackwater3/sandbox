@@ -33,8 +33,27 @@ def get_problem_id(rec: Dict[str, Any], idx: int) -> str:
     return str(rec.get('tigan_id') or rec.get('problem_idx') or rec.get('id') or idx)
 
 
-async def worker(sess: aiohttp.ClientSession, url: str, cpu_tag: str, q: asyncio.Queue,
-                 timeout_s: float, mem_mb: int, counters: Dict[str, int], failed: list):
+async def post_with_retry(url: str, payload: Dict[str, Any], retries: int, timeout_total: float) -> Dict[str, Any]:
+    delay = 0.2
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            to = aiohttp.ClientTimeout(total=timeout_total)
+            headers = {'Content-Type': 'application/json', 'Connection': 'close'}
+            async with aiohttp.request('POST', url, json=payload, timeout=to, headers=headers) as resp:
+                # accept non-JSON content-type too
+                return await resp.json(content_type=None)
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 2.0)
+                continue
+            raise
+
+
+async def worker(url: str, cpu_tag: str, q: asyncio.Queue, timeout_s: float, mem_mb: int, counters: Dict[str, int],
+                 failed: list, retries: int):
     while True:
         item = await q.get()
         if item is None:
@@ -49,8 +68,7 @@ async def worker(sess: aiohttp.ClientSession, url: str, cpu_tag: str, q: asyncio
             'memory_limit_MB': mem_mb,
         }
         try:
-            async with sess.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=None)) as resp:
-                data = await resp.json(content_type=None)
+            data = await post_with_retry(url, payload, retries=retries, timeout_total=None)
             if not isinstance(data, dict) or not data.get('passed', False):
                 counters['false'] += 1
                 err = None
@@ -75,33 +93,32 @@ async def main_async(args):
     queues = [asyncio.Queue() for _ in range(workers)]
     counters = {'false': 0}
     failed: List[Dict[str, Any]] = []
-    conn = aiohttp.TCPConnector(limit=workers * 2)
-    async with aiohttp.ClientSession(connector=conn) as sess:
-        tasks = []
-        for i in range(workers):
-            cpu_tag = str(cpu_start + i)
-            tasks.append(
-                asyncio.create_task(worker(sess, url, cpu_tag, queues[i], args.timeout, args.mem_mb, counters, failed)))
+    tasks = []
+    for i in range(workers):
+        cpu_tag = str(cpu_start + i)
+        tasks.append(
+            asyncio.create_task(worker(url, cpu_tag, queues[i], args.timeout, args.mem_mb, counters, failed,
+                                        retries=args.retries)))
 
-        # Feed records to queues by problem id hash
-        with open(args.jsonl, 'r', encoding='utf-8') as f:
-            for idx, line in enumerate(f):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except Exception:
-                    counters['false'] += 1
-                    continue
-                pid = get_problem_id(rec, idx)
-                wid = (hash(pid) % workers)
-                await queues[wid].put((idx, rec))
+    # Feed records to queues by problem id hash
+    with open(args.jsonl, 'r', encoding='utf-8') as f:
+        for idx, line in enumerate(f):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                counters['false'] += 1
+                continue
+            pid = get_problem_id(rec, idx)
+            wid = (hash(pid) % workers)
+            await queues[wid].put((idx, rec))
 
-        # Stop workers
-        for q in queues:
-            await q.put(None)
-        await asyncio.gather(*tasks)
+    # Stop workers
+    for q in queues:
+        await q.put(None)
+    await asyncio.gather(*tasks)
 
     # Write failed samples if requested
     if args.save_failed:
@@ -128,6 +145,7 @@ def parse_args():
     ap.add_argument('--cpu-start', type=int, default=0, help='start CPU id (default 0)')
     ap.add_argument('--timeout', type=float, default=10.0, help='per-record timeout_s to send to server')
     ap.add_argument('--mem-mb', type=int, default=-1, help='memory limit MB to send to server (-1 for unlimited)')
+    ap.add_argument('--retries', type=int, default=2, help='per-request retry times when network error occurs')
     ap.add_argument('--save-failed', default=None, help='path to save failed samples as JSONL')
     return ap.parse_args()
 
