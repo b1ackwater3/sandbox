@@ -1,79 +1,144 @@
 #!/usr/bin/env python3
 """
-Minimal client example for /eval_once.
+Concurrent batch client for /eval_once.
 
-Usage:
-  python example.py leetcode /volume/lli02/projects/example.json --host 127.0.0.1 --port 8080 --cpu-tag 2 --timeout 10
-  python example.py opencode /volume/lli02/projects/opc_example.json
+Reads a jsonl file; splits records into N groups (default 128) by problem id
+hash; starts N workers, each bound to a fixed CPU tag, and posts records in its
+group sequentially. Prints the number of records whose `passed` is False.
 
-Env alternatives:
-  SANDBOX_HOST, SANDBOX_PORT, CPU_TAG, TIMEOUT_S, MEM_MB
+Example:
+  python example.py /path/to/data.jsonl --host 127.0.0.1 --port 8080 \
+         --workers 128 --cpu-start 0 --timeout 10
 """
 
 import argparse
+import asyncio
 import json
 import os
 import sys
-import urllib.request
-import orjson
-loads = orjson.loads
+from typing import Any, Dict
 
-def post(url: str, payload: dict) -> dict:
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        body = resp.read().decode('utf-8', errors='replace')
-    try:
-        return json.loads(body)
-    except Exception:
-        return {'error': 'invalid json response', 'raw': body}
+import aiohttp
+
+
+def detect_source(rec: Dict[str, Any]) -> str:
+    if 'tigan_id' in rec or 'private_testcases' in rec:
+        return 'leetcode'
+    if 'problem_idx' in rec or 'test_case' in rec:
+        return 'opencode'
+    return 'leetcode'
+
+
+def get_problem_id(rec: Dict[str, Any], idx: int) -> str:
+    return str(rec.get('tigan_id') or rec.get('problem_idx') or rec.get('id') or idx)
+
+
+async def worker(sess: aiohttp.ClientSession, url: str, cpu_tag: str, q: asyncio.Queue,
+                 timeout_s: float, mem_mb: int, counters: Dict[str, int], failed: list):
+    while True:
+        item = await q.get()
+        if item is None:
+            q.task_done()
+            break
+        idx, rec = item
+        payload = {
+            'record': rec,
+            'source': detect_source(rec),
+            'cpu_tag': cpu_tag,
+            'timeout_s': timeout_s,
+            'memory_limit_MB': mem_mb,
+        }
+        try:
+            async with sess.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=None)) as resp:
+                data = await resp.json(content_type=None)
+            if not isinstance(data, dict) or not data.get('passed', False):
+                counters['false'] += 1
+                err = None
+                try:
+                    err = data.get('profile', {}).get('error_msg') if isinstance(data, dict) else None
+                except Exception:
+                    err = None
+                failed.append({'idx': idx, 'cpu_tag': cpu_tag, 'record': rec, 'error': err})
+        except Exception as e:
+            counters['false'] += 1
+            failed.append({'idx': idx, 'cpu_tag': cpu_tag, 'record': rec, 'error': str(e)})
+        finally:
+            q.task_done()
+
+
+async def main_async(args):
+    url = f'http://{args.host}:{args.port}/eval_once'
+    workers = int(args.workers)
+    cpu_start = int(args.cpu_start)
+
+    # Create per-worker queues and tasks
+    queues = [asyncio.Queue() for _ in range(workers)]
+    counters = {'false': 0}
+    failed: List[Dict[str, Any]] = []
+    conn = aiohttp.TCPConnector(limit=workers * 2)
+    async with aiohttp.ClientSession(connector=conn) as sess:
+        tasks = []
+        for i in range(workers):
+            cpu_tag = str(cpu_start + i)
+            tasks.append(
+                asyncio.create_task(worker(sess, url, cpu_tag, queues[i], args.timeout, args.mem_mb, counters, failed)))
+
+        # Feed records to queues by problem id hash
+        with open(args.jsonl, 'r', encoding='utf-8') as f:
+            for idx, line in enumerate(f):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    counters['false'] += 1
+                    continue
+                pid = get_problem_id(rec, idx)
+                wid = (hash(pid) % workers)
+                await queues[wid].put((idx, rec))
+
+        # Stop workers
+        for q in queues:
+            await q.put(None)
+        await asyncio.gather(*tasks)
+
+    # Write failed samples if requested
+    if args.save_failed:
+        try:
+            import pathlib
+            pathlib.Path(args.save_failed).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            with open(args.save_failed, 'w', encoding='utf-8') as f:
+                for item in failed:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
+    print(counters['false'])
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description='Run /eval_once over a jsonl with per-CPU workers.')
+    ap.add_argument('jsonl', help='path to input jsonl file')
+    ap.add_argument('--host', default=os.getenv('SANDBOX_HOST', '127.0.0.1'))
+    ap.add_argument('--port', type=int, default=int(os.getenv('SANDBOX_PORT', '8080')))
+    ap.add_argument('--workers', type=int, default=128, help='number of workers/CPUs (default 128)')
+    ap.add_argument('--cpu-start', type=int, default=0, help='start CPU id (default 0)')
+    ap.add_argument('--timeout', type=float, default=10.0, help='per-record timeout_s to send to server')
+    ap.add_argument('--mem-mb', type=int, default=-1, help='memory limit MB to send to server (-1 for unlimited)')
+    ap.add_argument('--save-failed', default=None, help='path to save failed samples as JSONL')
+    return ap.parse_args()
 
 
 def main():
-    ap = argparse.ArgumentParser(description='Call SandboxFusion /eval_once with a single record.')
-    ap.add_argument('source', nargs='?', choices=['leetcode', 'opencode'], help='record type')
-    ap.add_argument('json_path', nargs='?', help='path to record json (e.g., example.json)')
-    ap.add_argument('--host', default=os.getenv('SANDBOX_HOST', '127.0.0.1'))
-    ap.add_argument('--port', type=int, default=int(os.getenv('SANDBOX_PORT', '8080')))
-    ap.add_argument('--cpu-tag', default=os.getenv('CPU_TAG'))
-    ap.add_argument('--timeout', type=float, default=float(os.getenv('TIMEOUT_S', '20')))
-    ap.add_argument('--mem-mb', type=int, default=int(os.getenv('MEM_MB', '-1')))
-    args = ap.parse_args()
-
-    # Defaults if not provided
-    source = args.source or 'leetcode'
-    json_path = args.json_path or ('/volume/lli02/projects/opc_example.json' if source == 'opencode' else '/volume/lli02/projects/example.json')
-    count = 0
-    with open(json_path, 'r', encoding="utf-8") as f:
-        for line in f:
-            record = loads(line)
-
-    # with open(json_path, 'r') as f:
-    #     record = json.load(f)
-
-            payload = {
-                'record': record,
-                'source': source,
-                'timeout_s': args.timeout,
-                'memory_limit_MB': args.mem_mb,
-            }
-            if args.cpu_tag and str(args.cpu_tag).strip():
-                payload['cpu_tag'] = args.cpu_tag
-
-            url = f'http://{args.host}:{args.port}/eval_once'
-            # print('POST', url)
-            res = post(url, payload)
-            print(json.dumps(res, indent=2, ensure_ascii=False))
-            passed = res['passed']
-            if not passed:
-                count += 1
-            if res['profile']['error_msg']:
-                print(res['profile']['error_msg'])
-    print(count)
-
-if __name__ == '__main__':
+    args = parse_args()
     try:
-        main()
+        asyncio.run(main_async(args))
     except KeyboardInterrupt:
         sys.exit(130)
 
+
+if __name__ == '__main__':
+    main()

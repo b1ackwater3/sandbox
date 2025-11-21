@@ -415,17 +415,47 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
             _dt = time.perf_counter() - _t0
             _times.append(_dt)
             _exp = __EVAL_OUTPUTS[_i] if _i < len(__EVAL_OUTPUTS) else None
-            # If expected is list-like OR JSON-array string, coerce structures
-            _exp_is_list = isinstance(_exp, (list, tuple)) or (isinstance(_exp, str) and _exp.strip().startswith('['))
-            if _exp_is_list:
-                if hasattr(_got, 'left') and hasattr(_got, 'right'):
-                    _got = __EVAL_tree_to_list(_got)
-                elif hasattr(_got, 'next') and hasattr(_got, 'val'):
-                    _got = __EVAL_listnode_to_list(_got)
+
+            # Always coerce common node structures to lists for clearer comparison
+            if hasattr(_got, 'left') and hasattr(_got, 'right'):
+                _got = __EVAL_tree_to_list(_got)
+            elif hasattr(_got, 'next') and hasattr(_got, 'val'):
+                _got = __EVAL_listnode_to_list(_got)
+
+            # Primary deep equality
             if not __EVAL_equal(_got, _exp):
-                _msg = f'case {_i} mismatch: expect={_exp} got={_got}'
-                print(json.dumps({'passed': False, 'profile': {'avg_time': -1, 'all_time': _times, 'error_msg': _msg}}))
-                raise SystemExit(0)
+                # Unordered list-of-lists fallback
+                _matched = False
+                try:
+                    if isinstance(_got, list) and isinstance(_exp, list):
+                        def _to_hashable(x):
+                            x = __EVAL_norm(x)
+                            return tuple(x) if isinstance(x, list) else (x,)
+                        so = set(_to_hashable(x) for x in _got)
+                        se = set(_to_hashable(x) for x in _exp)
+                        if so == se:
+                            _matched = True
+                except Exception:
+                    pass
+
+                # In-place mutation fallback: when outputs is None-like, compare mutated first arg to expected
+                if not _matched:
+                    try:
+                        if (_got is None) and (len(_args) > 0):
+                            _cand = _args[0]
+                            if hasattr(_cand, 'left') and hasattr(_cand, 'right'):
+                                _cand = __EVAL_tree_to_list(_cand)
+                            elif hasattr(_cand, 'next') and hasattr(_cand, 'val'):
+                                _cand = __EVAL_listnode_to_list(_cand)
+                            if __EVAL_equal(_cand, _exp):
+                                _matched = True
+                    except Exception:
+                        pass
+
+                if not _matched:
+                    _msg = f'case {_i} mismatch: expect={_exp} got={_got}'
+                    print(json.dumps({'passed': False, 'profile': {'avg_time': -1, 'all_time': _times, 'error_msg': _msg}}))
+                    raise SystemExit(0)
 
         _avg = (sum(_times)/len(_times)) if _times else 0.0
         print(json.dumps({'passed': True, 'profile': {'avg_time': _avg, 'all_time': _times, 'error_msg': None}}))
