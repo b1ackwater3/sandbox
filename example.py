@@ -19,6 +19,7 @@ import sys
 from typing import Any, Dict
 
 import aiohttp
+import re
 
 
 def detect_source(rec: Dict[str, Any]) -> str:
@@ -52,8 +53,44 @@ async def post_with_retry(url: str, payload: Dict[str, Any], retries: int, timeo
             raise
 
 
+def extract_code(rec: Dict[str, Any]) -> Optional[str]:
+    # Prefer generation's fenced code
+    gen = rec.get('generation')
+    if isinstance(gen, str) and gen:
+        try:
+            m = re.findall(r"```python\s*([\s\S]*?)\s*```", gen, flags=re.IGNORECASE)
+            if m:
+                return m[0]
+            m = re.findall(r"```\s*([\s\S]*?)\s*```", gen, flags=re.IGNORECASE)
+            if m:
+                return m[0]
+        except Exception:
+            pass
+        return gen
+    # Leetcode fallback: valid_python_solutions_final
+    vps = rec.get('valid_python_solutions_final')
+    if isinstance(vps, list) and vps:
+        code = vps[0].get('code')
+        if isinstance(code, str) and code:
+            return code
+    # Generic alternatives
+    sol = rec.get('solution')
+    if isinstance(sol, str) and sol:
+        return sol
+    sols = rec.get('solutions')
+    if isinstance(sols, list) and sols:
+        cand = sols[0]
+        if isinstance(cand, dict):
+            c = cand.get('solution') or cand.get('code')
+            if isinstance(c, str) and c:
+                return c
+        elif isinstance(cand, str):
+            return cand
+    return None
+
+
 async def worker(url: str, cpu_tag: str, q: asyncio.Queue, timeout_s: float, mem_mb: int, counters: Dict[str, int],
-                 failed: list, retries: int):
+                 failed: list, analyses: list, retries: int):
     while True:
         item = await q.get()
         if item is None:
@@ -77,9 +114,25 @@ async def worker(url: str, cpu_tag: str, q: asyncio.Queue, timeout_s: float, mem
                 except Exception:
                     err = None
                 failed.append({'idx': idx, 'cpu_tag': cpu_tag, 'record': rec, 'error': err})
+                analyses.append({
+                    'idx': idx,
+                    'cpu_tag': cpu_tag,
+                    'error': err,
+                    'source': detect_source(rec),
+                    'fn_name': rec.get('fn_name'),
+                    'code': extract_code(rec)
+                })
         except Exception as e:
             counters['false'] += 1
             failed.append({'idx': idx, 'cpu_tag': cpu_tag, 'record': rec, 'error': str(e)})
+            analyses.append({
+                'idx': idx,
+                'cpu_tag': cpu_tag,
+                'error': str(e),
+                'source': detect_source(rec),
+                'fn_name': rec.get('fn_name'),
+                'code': extract_code(rec)
+            })
         finally:
             q.task_done()
 
@@ -93,12 +146,13 @@ async def main_async(args):
     queues = [asyncio.Queue() for _ in range(workers)]
     counters = {'false': 0}
     failed: List[Dict[str, Any]] = []
+    analyses: List[Dict[str, Any]] = []
     tasks = []
     for i in range(workers):
         cpu_tag = str(cpu_start + i)
         tasks.append(
             asyncio.create_task(worker(url, cpu_tag, queues[i], args.timeout, args.mem_mb, counters, failed,
-                                        retries=args.retries)))
+                                        analyses, retries=args.retries)))
 
     # Feed records to queues by problem id hash
     with open(args.jsonl, 'r', encoding='utf-8') as f:
@@ -133,6 +187,18 @@ async def main_async(args):
                     f.write(json.dumps(item, ensure_ascii=False) + '\n')
         except Exception:
             pass
+    if args.save_analyse:
+        try:
+            import pathlib
+            pathlib.Path(args.save_analyse).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            with open(args.save_analyse, 'w', encoding='utf-8') as f:
+                for item in analyses:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+        except Exception:
+            pass
     print(counters['false'])
 
 
@@ -147,6 +213,7 @@ def parse_args():
     ap.add_argument('--mem-mb', type=int, default=-1, help='memory limit MB to send to server (-1 for unlimited)')
     ap.add_argument('--retries', type=int, default=2, help='per-request retry times when network error occurs')
     ap.add_argument('--save-failed', default=None, help='path to save failed samples as JSONL')
+    ap.add_argument('--save-analyse', default=None, help='path to save analysis JSONL (idx,cpu,error,code)')
     return ap.parse_args()
 
 
