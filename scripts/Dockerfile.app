@@ -11,7 +11,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     # default to lite isolation
     SANDBOX_CONFIG=ci \
     HOST=0.0.0.0 \
-    PORT=8080
+    PORT=8080 \
+    PATH=/root/.local/bin:/root/miniconda3/bin:${PATH}
 
 # Optional small utilities; image already contains most toolchains
 RUN apt-get update && \
@@ -23,9 +24,8 @@ WORKDIR /root/SandboxFusion
 
 # Install Python deps (use layers for caching)
 COPY pyproject.toml poetry.lock ./
-RUN python3 -m pip install --no-cache-dir poetry && \
-    poetry config virtualenvs.create false && \
-    # some base images expect this file to exist when using conda python
+# The base server image already carries Python/Poetry via Miniconda path; just use it.
+RUN poetry config virtualenvs.create false && \
     (touch /root/miniconda3/pyvenv.cfg || true) && \
     poetry install --no-interaction --no-ansi
 
@@ -39,4 +39,3 @@ EXPOSE 8080
 
 # Start the FastAPI server; honors HOST/PORT envs
 CMD ["bash", "/root/SandboxFusion/run.sh"]
-
