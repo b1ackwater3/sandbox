@@ -109,6 +109,49 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
 
     fn_name = rec.get('fn_name') or 'solve'
 
+    # Normalize optional param/return types to guide tree/linked-list handling
+    def _normalize_type_str(s: str) -> str:
+        return re.sub(r"\s+|_", "", (s or '').strip().lower())
+
+    param_types_raw = rec.get('fn_param_types')
+    param_types_list: List[str] = []
+    if isinstance(param_types_raw, list):
+        param_types_list = [_normalize_type_str(str(x)) for x in param_types_raw]
+    elif isinstance(param_types_raw, str) and param_types_raw.strip():
+        # Try JSON first
+        try:
+            arr = json.loads(param_types_raw)
+            if isinstance(arr, list):
+                param_types_list = [_normalize_type_str(str(x)) for x in arr]
+            else:
+                param_types_list = [_normalize_type_str(param_types_raw)]
+        except Exception:
+            # Split by commas not inside brackets (simple heuristic)
+            parts = []
+            buf = ''
+            depth = 0
+            for ch in param_types_raw:
+                if ch == '[':
+                    depth += 1
+                elif ch == ']':
+                    depth = max(0, depth - 1)
+                if ch == ',' and depth == 0:
+                    parts.append(buf)
+                    buf = ''
+                else:
+                    buf += ch
+            if buf:
+                parts.append(buf)
+            if parts:
+                param_types_list = [_normalize_type_str(p) for p in parts]
+            else:
+                param_types_list = [_normalize_type_str(param_types_raw)]
+
+    ret_type_raw = rec.get('fn_return_type')
+    ret_type_norm: Optional[str] = None
+    if isinstance(ret_type_raw, str) and ret_type_raw.strip():
+        ret_type_norm = _normalize_type_str(ret_type_raw)
+
     # testcases format: {"input": {param: [v1, v2, ...]}, "output": [o1, o2, ...]}
     tcs = rec.get('private_testcases') or {}
     inputs = tcs.get('input') or {}
