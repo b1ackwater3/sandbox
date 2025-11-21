@@ -188,34 +188,27 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
             it = iter(vals)
             root_val = next(it)
             root = TreeNode(root_val) if root_val is not None else None
+            if root is None:
+                return None
             q = [root]
             while q:
                 node = q.pop(0)
-                if node is None:
-                    # consume two placeholders if present
-                    try:
-                        next(it)
-                    except StopIteration:
-                        break
-                    try:
-                        next(it)
-                    except StopIteration:
-                        break
-                    continue
+                # Only expand non-None nodes; Leetcode level-order input does not
+                # provide children for None placeholders
                 try:
                     lv = next(it)
                 except StopIteration:
                     break
                 if lv is not None:
                     node.left = TreeNode(lv)
-                q.append(node.left)
+                    q.append(node.left)
                 try:
                     rv = next(it)
                 except StopIteration:
                     break
                 if rv is not None:
                     node.right = TreeNode(rv)
-                q.append(node.right)
+                    q.append(node.right)
             return root
 
         def __EVAL_tree_to_list(root):
