@@ -118,13 +118,13 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
     tpl = Template(dedent(
         r"""
         import os, json, time, inspect, copy, math, re
+        # Keep imports minimal to avoid polluting user code (e.g., do not override builtins.pow)
         from typing import *
         import re
         import itertools
         import bisect
         import collections, heapq, bisect, string, sys, functools, operator
         from string import *
-        from math import *
         from sys import maxsize, stdin
         from bisect import bisect_left, bisect_right, insort_left, insort_right, insort
         from itertools import *
@@ -234,13 +234,46 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
                 arr.pop()
             return arr
 
-        def __EVAL_convert_arg(name, v):
-            nm = (name or '').lower()
+        __EVAL_PARAM_TYPES = $PARAM_TYPES
+        __EVAL_RET_TYPE = $RET_TYPE
+
+        def __EVAL_is_tree_type(t: str) -> bool:
+            t = (t or '').lower()
+            return ('treenode' in t) or ('binarytree' in t) or (t == 'tree') or ('tree' in t)
+
+        def __EVAL_is_listnode_type(t: str) -> bool:
+            t = (t or '').lower()
+            return ('listnode' in t) or ('linkedlist' in t)
+
+        def __EVAL_is_list_of_scalars(v) -> bool:
+            if not isinstance(v, list):
+                return False
+            for x in v:
+                if isinstance(x, (list, tuple, dict)):
+                    return False
+            return True
+
+        def __EVAL_convert_arg(name, v, idx):
+            # Priority: types -> name heuristic (no p/q) -> raw
+            t = None
+            try:
+                if isinstance(__EVAL_PARAM_TYPES, list) and idx < len(__EVAL_PARAM_TYPES):
+                    t = __EVAL_PARAM_TYPES[idx]
+            except Exception:
+                t = None
             if isinstance(v, list):
-                if (nm in ('root', 'root1', 'root2', 'p', 'q')) or ('root' in nm) or ('tree' in nm) or ('node' in nm):
-                    return __EVAL_build_tree(v)
-                if nm in ('head', 'head1', 'head2', 'heada', 'headb', 'l1', 'l2') or nm.startswith('head') or nm.endswith('list'):
-                    return __EVAL_build_list(v)
+                if t:
+                    if __EVAL_is_tree_type(t):
+                        return __EVAL_build_tree(v)
+                    if __EVAL_is_listnode_type(t):
+                        return __EVAL_build_list(v)
+                nm = (name or '').lower()
+                # fallback heuristics only when types are missing
+                if not t and __EVAL_is_list_of_scalars(v):
+                    if ('root' in nm) or ('tree' in nm) or ('node' in nm):
+                        return __EVAL_build_tree(v)
+                    if (nm in ('head', 'head1', 'head2', 'heada', 'headb', 'l1', 'l2')) or nm.startswith('head') or nm.endswith('list'):
+                        return __EVAL_build_list(v)
             return v
 
         def __EVAL_bind_args(param_names, inputs, index):
@@ -395,13 +428,13 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
         _times = []
         for _i in range(int(_case_num)):
             if _param_names and set(_param_names).issubset(set(_keys)):
-                _args = [__EVAL_convert_arg(k, __EVAL_INPUTS[k][_i]) for k in _param_names]
+                _args = [__EVAL_convert_arg(k, __EVAL_INPUTS[k][_i], idx) for idx, k in enumerate(_param_names)]
                 _kwargs = {}
             else:
                 if _param_names:
                     _args = __EVAL_bind_args(_param_names, __EVAL_INPUTS, _i)
                 else:
-                    _args = [__EVAL_convert_arg(k, __EVAL_INPUTS[k][_i]) for k in _keys]
+                    _args = [__EVAL_convert_arg(k, __EVAL_INPUTS[k][_i], idx) for idx, k in enumerate(_keys)]
                 _kwargs = {}
             _t0 = time.perf_counter()
             _got = __EVAL_FN(*_args, **_kwargs)
@@ -409,7 +442,15 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
             _times.append(_dt)
             _exp = __EVAL_OUTPUTS[_i] if _i < len(__EVAL_OUTPUTS) else None
 
-            # Always coerce common node structures to lists for clearer comparison
+            # Coerce result guided by return type (if provided)
+            try:
+                if __EVAL_RET_TYPE and __EVAL_is_tree_type(__EVAL_RET_TYPE) and hasattr(_got, 'left'):
+                    _got = __EVAL_tree_to_list(_got)
+                elif __EVAL_RET_TYPE and __EVAL_is_listnode_type(__EVAL_RET_TYPE) and hasattr(_got, 'next'):
+                    _got = __EVAL_listnode_to_list(_got)
+            except Exception:
+                pass
+            # Also handle cases where return type is missing but object clearly is a node
             if hasattr(_got, 'left') and hasattr(_got, 'right'):
                 _got = __EVAL_tree_to_list(_got)
             elif hasattr(_got, 'next') and hasattr(_got, 'val'):
@@ -436,10 +477,19 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
                     try:
                         if (_got is None) and (len(_args) > 0):
                             _cand = _args[0]
-                            if hasattr(_cand, 'left') and hasattr(_cand, 'right'):
+                            try:
+                                arg0_t = __EVAL_PARAM_TYPES[0] if isinstance(__EVAL_PARAM_TYPES, list) and __EVAL_PARAM_TYPES else None
+                            except Exception:
+                                arg0_t = None
+                            if arg0_t and __EVAL_is_tree_type(arg0_t) and hasattr(_cand, 'left'):
                                 _cand = __EVAL_tree_to_list(_cand)
-                            elif hasattr(_cand, 'next') and hasattr(_cand, 'val'):
+                            elif arg0_t and __EVAL_is_listnode_type(arg0_t) and hasattr(_cand, 'next'):
                                 _cand = __EVAL_listnode_to_list(_cand)
+                            else:
+                                if hasattr(_cand, 'left') and hasattr(_cand, 'right'):
+                                    _cand = __EVAL_tree_to_list(_cand)
+                                elif hasattr(_cand, 'next') and hasattr(_cand, 'val'):
+                                    _cand = __EVAL_listnode_to_list(_cand)
                             if __EVAL_equal(_cand, _exp):
                                 _matched = True
                     except Exception:
@@ -460,6 +510,8 @@ def _build_driver_leetcode(rec: Dict[str, Any], cpus: List[int]) -> str:
         FN_NAME=fn_name,
         INPUTS_JSON=json.dumps(inputs, ensure_ascii=True),
         OUTPUTS_JSON=json.dumps(outputs, ensure_ascii=True),
+        PARAM_TYPES=json.dumps(param_types_list, ensure_ascii=True),
+        RET_TYPE=(json.dumps(ret_type_norm) if ret_type_norm is not None else 'null'),
     )
 
 
