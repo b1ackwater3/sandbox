@@ -23,7 +23,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from sandbox.runners import CODE_RUNNERS
-from sandbox.runners.types import CodeRunArgs
+from sandbox.runners.types import CodeRunArgs, CommandRunStatus
 
 
 # Minimal, isolated eval API for single-record evaluation + profiling.
@@ -516,22 +516,26 @@ async def eval_once(req: EvalOnceRequest) -> EvalOnceResponse:
     result = await CODE_RUNNERS['python'](
         CodeRunArgs(code=code, run_timeout=run_timeout, memory_limit_MB=req.memory_limit_MB))
 
-    # Parse the last non-empty line of stdout as JSON
+    # Parse result robustly; turn timeouts/empty stdout into a structured failure
     err: Optional[str] = None
     out: Optional[Dict[str, Any]] = None
-    if result.run_result and result.run_result.stdout:
-        lines = [ln for ln in result.run_result.stdout.strip().splitlines() if ln.strip()]
+    rr = getattr(result, 'run_result', None)
+    if not rr:
+        err = 'no run_result'
+    elif rr.status == CommandRunStatus.TimeLimitExceeded:
+        err = 'TimeLimitExceeded'
+    else:
+        s = rr.stdout or ''
+        lines = [ln for ln in s.strip().splitlines() if ln.strip()]
         if lines:
             try:
                 out = json.loads(lines[-1])
             except Exception as e:
                 err = f'bad json stdout: {e}'
         else:
-            err = 'empty stdout'
-    else:
-        err = (result.run_result.stderr if result.run_result else 'no run_result')
+            err = rr.stderr or 'empty stdout'
 
-    if err or (result.run_result and result.run_result.return_code not in (0, None)):
+    if err or (rr and rr.return_code not in (0, None)) or not isinstance(out, dict):
         return EvalOnceResponse(passed=False, profile=Profile(avg_time=-1, all_time=[], error_msg=err or 'runtime error'))
 
     return EvalOnceResponse(**out)  # type: ignore[arg-type]
